@@ -1,4 +1,5 @@
 #include "fluidsCuda.h"
+#include "fluidsCuda.cu"
 #include <math.h>
 using namespace std;
 
@@ -22,8 +23,8 @@ const char *fragmentShaderText =
 
 int main(int argc, char *argv[])
 {
-	simWidth = 4;
-	simHeight = 4;
+	simWidth = 257;
+	simHeight = 257;
 
 	// start GL context and O/S window using the GLFW helper library
 	if (!glfwInit()) {
@@ -31,7 +32,8 @@ int main(int argc, char *argv[])
 		return 1;
 	} 
 
-	GLFWwindow* window = glfwCreateWindow(1600, 1000, "Cuda Fluid Dynamics", NULL, NULL);
+	GLFWwindow* window = glfwCreateWindow(1920/2, 1080/2, "Cuda Fluid Dynamics", NULL, NULL);
+	glfwSetWindowPos(window, 1920/2, 0);
 	if (!window) {
 		fprintf(stderr, "ERROR: could not open window with GLFW3\n");
 		glfwTerminate();
@@ -42,10 +44,10 @@ int main(int argc, char *argv[])
 	glewExperimental = GL_TRUE;
 	glewInit();
 
-	const GLubyte* renderer = glGetString(GL_RENDERER); 
-	const GLubyte* version = glGetString(GL_VERSION); 
-	printf("Renderer: %s\n", renderer);
-	printf("OpenGL version supported %s\n", version);
+	//const GLubyte* renderer = glGetString(GL_RENDERER); 
+	//const GLubyte* version = glGetString(GL_VERSION); 
+	//printf("Renderer: %s\n", renderer);
+	//printf("OpenGL version supported %s\n", version);
 
 			///*** Post GL Initializatiuon ***///
 
@@ -56,7 +58,6 @@ int main(int argc, char *argv[])
 
 	float3 *points = (float3*)malloc(indexCount*sizeof(float3));
 	float3 *colors = (float3*)malloc(indexCount*sizeof(float3));
-	cout << indexCount << " indexCount " << endl;
 
 	int idxRow = 0;
 	int idxCol = 0;
@@ -91,11 +92,11 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	cout << "colors: " << indexCount<<endl;
+	cout << "	Color Data: " << indexCount<<endl;
 	quadNum = 0;
 	for (int i = 0; i < indexCount; i++){
-		colors[i].x = 1.0f;
-		colors[i].y = (float)quadNum/(simWidth*simHeight); cout<<colors[i].y;
+		colors[i].x = 0.0f;
+		colors[i].y = 0.0f; 
 		colors[i].z = 0.0f;
 		if(i%4==0 && i!=0){
 			quadNum++;
@@ -114,6 +115,8 @@ int main(int argc, char *argv[])
 	glGenBuffers(1, &colorsVBO);
 	glBindBuffer(GL_ARRAY_BUFFER, colorsVBO);
 	glBufferData(GL_ARRAY_BUFFER, indexCount*sizeof(float3), colors, GL_DYNAMIC_DRAW);
+	struct cudaGraphicsResource *cudaColorResource;
+	checkCuda(cudaGraphicsGLRegisterBuffer(&cudaColorResource, colorsVBO, cudaGraphicsMapFlagsNone));
 
 		// Index Buffer Array
 
@@ -161,16 +164,74 @@ int main(int argc, char *argv[])
 
 			///*** Draw Loop ***///
 	
+	float simTime = 0.0;
+	float dt = 0.1;
+	cudaEvent_t start, stop; 
+	float fpsTime;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	
+	int xBlocks;
+	int yBlocks;
+	int numThreads = (simWidth-1)*4 * (simHeight-1);	
+	switch(numThreads){
+		case 1024:
+			xBlocks = 1;
+			yBlocks = 8;
+			break;
+		case 4096:
+			xBlocks = 1;
+			yBlocks = 8;
+			break;
+		case 16384:
+			xBlocks = 1;
+			yBlocks = 32;
+			break;
+		case 65536:
+			xBlocks = 1;
+			yBlocks = 128;
+			break;
+		case 262144:
+			xBlocks = 2;
+			yBlocks = 256;
+			break;
+		default:
+			std::cout<<"Bad Dimensions"<<std::endl;
+			return 0;
+	}
+			
+	dim3 tpb((simWidth-1)*4/xBlocks, (simHeight-1)/yBlocks);
+	dim3 blocks(1, yBlocks);
+	std::cout<<"	Calling kernel with:"<<std::endl
+			 <<"	ThreadsPerBlock: ["<<tpb.x<<", "<<tpb.y<<"]"<<std::endl
+			 <<"	On a Grid of: ["<<blocks.x<<"x"<<blocks.y<<"] Blocks"<<std::endl;
+
+
 	while(!glfwWindowShouldClose(window)) {
+
+		cudaEventRecord(start, 0);
+		simTime+=dt;
+		runCuda(&cudaColorResource, simTime, simWidth, simHeight);
+		
+		
+
+
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		glUseProgram(shaderProgram);
-
 		glBindVertexArray(vertexArray);
-
 		glDrawArrays(GL_QUADS, 0, indexCount);
 
 		glfwSwapBuffers(window);
   		glfwPollEvents();
+
+		cudaEventRecord(stop, 0);
+		cudaEventSynchronize(stop);
+		cudaEventElapsedTime(&fpsTime, start, stop);
+		char title[256];
+		sprintf(title, "CudaFluidDynamics: %12.2f fps", 1.0f/(fpsTime/1000.0f));
+		glfwSetWindowTitle(window, title);
+
+		
 
 		if(glfwGetKey(window, GLFW_KEY_ESCAPE)) {
 			glfwSetWindowShouldClose(window, 1);

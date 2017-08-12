@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <iostream>
 #include <assert.h>
 
@@ -61,6 +62,9 @@ void runSim(GLuint c_vbo,
 			unsigned int simWidth,
 			unsigned int simHeight);
 
-void runCuda(struct cudaGraphicsResource **vboResource);
+void runCuda(struct cudaGraphicsResource **vboResource,
+			 float time, 
+			 unsigned int simWidth,
+			 unsigned int simHeight);
 
 #endif
