@@ -8,11 +8,13 @@ CC = g++
 CFLAGS = -std=c++11
 
 
-obj/%.o: src/%.cu
-	$(NVCC) $(NVFLAGS) -c $< $(LIBS)
 
 gltest: $(OBJ_FILES) 
 	$(NVCC) $(NVFLAGS) -o gltest main.o $(LIBS)
+
+obj/%.o: src/%.cu
+	$(NVCC) $(NVFLAGS) -c $< $(LIBS)
+
 
 
 clean: 

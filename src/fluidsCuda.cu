@@ -1,26 +1,13 @@
 #include "fluidsCuda.h"
 
-/*
-void initCudaVBO(GLuint *vbo, 
-				 struct cudaGraphicsResource **vboRes, 
-			 	 unsigned int vboResFlags, 
-				 unsigned int simHeight,
-				 unsigned int simWidth)
-{
-	glGenBuffers(1, vbo);
-	glBindBuffer(GL_ARRAY_BUFFER, *vbo);
-
-	unsigned int size = simWidth * simHeight * 3 * sizeof(float);
-	glBufferData(GL_ARRAY_BUFFER, size, 0, GL_DYNAMIC_DRAW);
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-	checkCuda(cudaGraphicsGLRegisterBuffer(vboRes, *vbo, vboResFlags));
-}*/
+			/* Kernel to operate on color data by quadIdx, 
+			 * might become null as color will be represented
+			 * by velocity data directly in the future */
 
 __global__ void
 testKernel(float3 *colors,
 		   float time,
-		   int xBlocks,
+		   dim3 blocks,
 		   unsigned int simWidth,
 		   unsigned int simHeight)
 {
@@ -29,39 +16,123 @@ testKernel(float3 *colors,
 	
 		// bundle color ops to quads
 
-	int quadIdx = (x + y*blockDim.x*xBlocks)/4;
+	int quadIdx = (x + y*blockDim.x*blocks.x)/4;
 	int corner = (x + y*blockDim.x)%4;
 
 		// Positions in quad space 
 
-	int u = (simWidth-1) - (quadIdx % (simWidth-1));
-	int v = (quadIdx / (simHeight - 1));
-
-
-	colors[4*quadIdx+corner] = make_float3(cosf(u/3.14f - time), sinf(v/3.14f + time) + sinf(u/3.14f + time), sinf(2*v/3.14f + time));
-	
+	int u = simWidth - (quadIdx % simWidth);
+	int v = quadIdx / simHeight;
+	colors[4*quadIdx+corner] = make_float3(cosf(u/3.14f - time), 
+										   sinf(v/3.14f + time) + sinf(u/3.14f + time), 
+										   sinf(2*v/3.14f + time));
 }
 
-/*
-void runSim(GLuint c_vbo,
-			int *argc,
-			char **argv,
-			struct cudaGraphicsResource **vboResource, 
-			unsigned int simWidth,
-			unsigned int simHeight)
+			/* Update old velocity data to current velocity data.
+			 * These update at random and so must be updated in 
+			 * bulk after velocity calculations are done */
+
+__global__ void 
+updateVel(float2 *__restrict__ oldVel,
+		  float2 *__restrict__ newVel,
+		  unsigned int simWidth)
 {
+	unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+	unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+	oldVel[y*simWidth+x] = newVel[y*simWidth+x];
+}
 
-	initGL(argc, argv);
+			/* Bilinear Interpolation of velocities at four nearest
+			 * mesh points giving the expected velocity at an arbitrary
+			 * point contained */
 
-	glutDisplayFunc(display);
+__device__ float2
+BiLinInterp(float2 pos,
+			float2 TLVel, float2 TLPos,
+			float2 BLVel, float2 BLPos,
+			float2 BRVel, float2 BRPos,
+			float2 TRVel, float2 TRPos,
+			float dr)
+{
+	float2 TopInterp;
+	float2 BotInterp;
+	TopInterp.x = TLVel.x + (TRVel.x - TLVel.x)*pos.x/dr;
+	BotInterp.x = BLVel.x + (BRVel.x - BLVel.x)*pos.x/dr;
+	TopInterp.y = TLVel.y + (TRVel.y - TLVel.y)*pos.x/dr;
+	BotInterp.y = BLVel.y + (BRVel.y - BLVel.y)*pos.x/dr;
 
-	//runCuda(vboResource);
+	float2 ResInterp;
+	ResInterp.x = BotInterp.x + (TopInterp.x - BotInterp.x)*pos.y/dr;
+	ResInterp.y = BotInterp.y + (TopInterp.y - BotInterp.y)*pos.y/dr;
 
-	glutMainLoop();
-}*/
+	return ResInterp;
+}
+
+
+			/* Advection method, utilizes backtracing to update
+			 * velocities at each point on the lattice. Some 
+			 * extra consideration when backtracing goes beyond
+			 * simulation boundaries */
+
+__global__ void 
+Advect(float2* positions,
+	   float2* oldVel, 
+	   float2* newVel,
+	   float dt,
+	   float dr,
+	   float4 boundaries,
+	   unsigned int simWidth,
+	   unsigned int simHeight)
+{
+		// actual realPos index
+	unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+	unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+	float2 tracedPos;
+
+	float dx = oldVel[x*simWidth+y].x * dr * dt;
+	float dy = oldVel[x*simWidth+y].y * dr * dt;
+
+	tracedPos.x = positions[x*simWidth+y].x - oldVel[x*simWidth+y].x * dr * dt;
+	tracedPos.y = positions[x*simWidth+y].y - oldVel[x*simWidth+y].y * dr * dt;
+
+			// change in realQuad position
+
+	unsigned int dQuadsX = floor(dx / dr);
+	unsigned int dQuadsY = floor(dy / dr);
+
+			// is tracedPos within simulation boundaries
+
+	if(tracedPos.x > boundaries.x && 
+	   tracedPos.x < boundaries.z &&
+	   tracedPos.y > boundaries.y &&
+	   tracedPos.y < boundaries.w) {
+
+		float2 TLPos = positions[(x-dQuadsX-1)*simWidth+(y+dQuadsY)];
+		float2 TRPos = positions[(x-dQuadsX)*simWidth+(y+dQuadsY)];
+		float2 BLPos = positions[(x-dQuadsX-1)*simWidth+(y+dQuadsY+1)];
+		float2 BRPos = positions[(x-dQuadsX)*simWidth+(y+dQuadsY+1)];
+
+		float2 TLVel = oldVel[(x-dQuadsX-1)*simWidth+(y+dQuadsY)];
+		float2 TRVel = oldVel[(x-dQuadsX)*simWidth+(y+dQuadsY)];
+		float2 BLVel = oldVel[(x-dQuadsX-1)*simWidth+(y+dQuadsY+1)];
+		float2 BRVel = oldVel[(x-dQuadsX)*simWidth+(y+dQuadsY+1)];
+
+		newVel[x*simWidth+y] = BiLinInterp(tracedPos, 
+										   TLVel, TLPos,
+										   BLVel, BLPos,
+										   BRVel, BRPos,
+										   TRVel, TRPos,
+										   dr);
+	}
+			// TODO need cases for velocity sources for hitting x/y/z/w boundaries
+}
+
 
 void runCuda(struct cudaGraphicsResource **vboResource,
-			 float time,
+			 float dt,
+			 dim3 tpb,
+			 dim3 blocks,
 			 unsigned int simWidth,
 			 unsigned int simHeight)
 {
@@ -71,14 +142,72 @@ void runCuda(struct cudaGraphicsResource **vboResource,
 	checkCuda(cudaGraphicsResourceGetMappedPointer((void**)&devPtr, &numBytes,
 												   *vboResource));
 	
-			/* Computing downwards by rows of 2d space, select
-			 * a block size depending on how many threads. Aiming 
-			 * for 512 block size, i.e. if simulation size 
-			 * requires 4096 threads, calc is done in 8 blocks */
+	testKernel<<< blocks, tpb >>>(devPtr, dt, blocks, simWidth, simHeight);
+	checkCuda(cudaGraphicsUnmapResources(1, vboResource, 0));
+}
 
+void glfwInitContext(GLFWwindow* window)
+{
+	if (!glfwInit()) {
+		fprintf(stderr, "ERROR: could not start GLFW3\n");
+		exit(1);
+	} 
+
+	window = glfwCreateWindow(1920/2, 1080/2, "Cuda Fluid Dynamics", NULL, NULL);
+	glfwSetWindowPos(window, 1920/2, 0);
+	if (!window) {
+		fprintf(stderr, "ERROR: could not open window with GLFW3\n");
+		glfwTerminate();
+		exit(1);
+	}
+	glfwMakeContextCurrent(window);
+
+	glewExperimental = GL_TRUE;
+	glewInit();
+}
+
+void glInitShaders(const char *vertexShaderText,
+			 	   const char *fragmentShaderText,
+				   GLuint shaderProgram)
+{
+	GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
+	glShaderSource(vertexShader, 1, &vertexShaderText, NULL);
+	glCompileShader(vertexShader);
+	int params = -1;
+	glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &params);
+	if(GL_TRUE != params){	
+		int actual_length = 0;
+		char log[2048];
+		fprintf(stderr, "ERROR: GL shader idx %i did not compile\n", vertexShader);
+		glGetShaderInfoLog(vertexShader, 500, &actual_length, log);
+		std::cout << log;
+		exit(1);
+	}
+	GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+	glShaderSource(fragmentShader, 1, &fragmentShaderText, NULL);
+	glCompileShader(fragmentShader);
+	glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &params);
+	if(GL_TRUE != params){	
+		int actual_length = 0;
+		char log[2048];
+		fprintf(stderr, "ERROR: GL shader idx %i did not compile\n", vertexShader);
+		glGetShaderInfoLog(vertexShader, 500, &actual_length, log);
+		std::cout << log;
+		exit(1);
+	}
+	glAttachShader(shaderProgram, vertexShader);
+	glAttachShader(shaderProgram, fragmentShader);
+	glLinkProgram(shaderProgram);
+}
+
+void initThreadDimensions(unsigned int simWidth,
+						  unsigned int simHeight,
+						  dim3 &tpb,
+						  dim3 &blocks)
+{
 	int xBlocks;
 	int yBlocks;
-	int numThreads = (simWidth-1)*4 * (simHeight-1);	
+	int numThreads = simWidth*4*simHeight;	
 	switch(numThreads){
 		case 1024:
 			xBlocks = 1;
@@ -102,71 +231,16 @@ void runCuda(struct cudaGraphicsResource **vboResource,
 			break;
 		default:
 			std::cout<<"Bad Dimensions"<<std::endl;
-			return;
+			exit(1);
 	}
 			
-	dim3 tpb((simWidth-1)*4/xBlocks, (simHeight-1)/yBlocks);
-	dim3 blocks(xBlocks, yBlocks);
-	/*
-	std::cout<<"	Calling kernel with:"<<std::endl
-			 <<"	ThreadsPerBlock: ["<<tpb.x<<", "<<tpb.y<<std::endl
-			 <<"	On a Grid of: ["<<blocks.x<<"x"<<blocks.y<<" Blocks"<<std::endl;
-	*/
-	testKernel<<< blocks, tpb >>>(devPtr, time, xBlocks, simWidth, simHeight);
-	//std::cout<<cudaGetErrorString(cudaGetLastError())<<std::endl;
-
-	checkCuda(cudaGraphicsUnmapResources(1, vboResource, 0));
+	tpb.x = simWidth*4/xBlocks;
+	tpb.y = simHeight/yBlocks;
+	blocks.x = xBlocks;
+	blocks.y = yBlocks;
+	std::cout<<"	Calling kernels with:"<<std::endl
+			 <<"	ThreadsPerBlock: ["<<tpb.x<<", "<<tpb.y<<"]"<<std::endl
+			 <<"	On a Grid of: ["<<blocks.x<<"x"<<blocks.y<<"] Blocks"<<std::endl;
 }
 
-
-	
-
-/*
-bool initGL(int *argc, char **argv)
-{
-    glutInit(argc, argv);
-    glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
-    glutInitWindowSize(1600, 1000);
-    glutCreateWindow("Cuda GL Test");
-    glutDisplayFunc(display);
-
-    // default initialization
-    glClearColor(0.0, 0.0, 0.0, 1.0);
-    glDisable(GL_DEPTH_TEST);
-
-    // viewport
-    glViewport(0, 0, 1600, 1000);
-
-    // projection
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    gluPerspective(60.0, (GLfloat)1600 / (GLfloat)1000, 0.1, 10.0);
-
-    return true;
-}*/
-/*
-void display()
-{
-    // run CUDA kernel to generate vertex positions
-	//runCuda(&cudaVBOResource);
-
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    // set view matrix
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-    glTranslatef(0.0, 0.0, translate_z);
-    glRotatef(rotate_x, 1.0, 0.0, 0.0);
-    glRotatef(rotate_y, 0.0, 1.0, 0.0);
-
-    // render from the vbo
-    glBindBuffer(GL_ARRAY_BUFFER, c_vbo);
-    glVertexPointer(3, GL_FLOAT, 0, 0);
-
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glDrawArrays(GL_QUADS, 0, simWidth * simHeight);
-    glDisableClientState(GL_VERTEX_ARRAY);
-
-    glutSwapBuffers();
-}*/
 

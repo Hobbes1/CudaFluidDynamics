@@ -19,14 +19,6 @@
 #define rowColIdx row*simWidth+col
 #define REFRESH_DELAY 10 
 
-
-struct cudaGraphicsResource *cudaVBOResource;
-GLuint c_vbo;
-GLuint p_vbo;
-
-unsigned int simWidth;
-unsigned int simHeight;
-
 inline 
 cudaError_t checkCuda(cudaError_t result){
 	if (result != cudaSuccess){
@@ -36,24 +28,29 @@ cudaError_t checkCuda(cudaError_t result){
 	return result;
 }
 
-const char* vertex_shader = 
-"#version 420\n"
-"layout(location=0) in vec4 vp;"
-"layout(location=1) in vec3 vc;"
+const char *vertexShaderText = 
+"#version 450 \n"
+"layout(location = 0) in vec3 vertexPosition;"
+"layout(location = 1) in vec3 vertexColor;"
 "out vec3 color;"
-"void main() {\n"
-"	color = vc;"
-"  	gl_Position = vec4(vec4);}";
+"void main() {"
+"	color = vertexColor;"
+"	gl_Position = vec4(vertexPosition, 1.0);"
+"}";
 
-const char* fragment_shader = 
-"#version 420\n"
-"layout(location=1) in vec3 color;"
-"out vec4 frag_color;"
-"void main() {\n"
-"	frag_color = vec4(color, 1.0);}";
+const char *fragmentShaderText = 
+"#version 450\n"
+"in vec3 color;"
+"out vec4 fragmentColor;"
+"void main() {"
+"	fragmentColor = vec4(color, 1.0);"
+"}";
 
-void display();
-bool initGL(int *argc, char **argv);
+__global__ void testKernel(float3 *colors,
+		   float time,
+		   dim3 blocks,
+		   unsigned int simWidth,
+		   unsigned int simHeight);
 
 void runSim(GLuint c_vbo,
 			int *argc,
@@ -64,7 +61,17 @@ void runSim(GLuint c_vbo,
 
 void runCuda(struct cudaGraphicsResource **vboResource,
 			 float time, 
+			 dim3 tpb,
+			 dim3 blocks,
 			 unsigned int simWidth,
 			 unsigned int simHeight);
 
+void glInitShaders(const char *vertexShaderText,
+			 	   const char *fragmentShaderText,
+				   GLuint shaderProgram);
+
+void initThreadDimensions(unsigned int simWidth,
+						  unsigned int simHeight,
+						  dim3 &tpb,
+						  dim3 &blocks);
 #endif
