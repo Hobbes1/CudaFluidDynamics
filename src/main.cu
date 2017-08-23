@@ -4,15 +4,18 @@ using namespace std;
 
 int main(int argc, char *argv[])
 {
-	unsigned int simWidth = 256;	// x divisions
-	unsigned int simHeight = 256;	// y divisions
+	unsigned int simWidth = 128;	// x divisions
+	unsigned int simHeight = 128;// y divisions
 									// note: 6mx6m with 256x256 yields ~square inch resolution
 	float xRange = 6.0; 			// meters
 	float yRange = 6.0;				// meters
-	float frameVel = 10.0;			// speed of object, right to left
+	float frameVel = 7.0;			// speed of object, right to left
+
+	float dt = 0.001;
 
 	int colorIndexCount = simWidth * simHeight * 4;
 	int realIndexCount = simWidth * simHeight;
+	cout <<"	frameVel will cover "<<frameVel*dt/(xRange/simWidth)<<" quads" <<endl;
 
 			/////////*** Quad Vertices and Color data, 4x as large as real data ***/////////
 
@@ -21,8 +24,8 @@ int main(int argc, char *argv[])
 
 	int idxRow = 0;
 	int idxCol = 0;
-	float halfHeight = (float)1.0/simHeight;
-	float halfWidth = (float)1.0/simWidth;
+	float halfHeight = 0.0 ; // (float)0.5/simHeight;
+	float halfWidth = 0.0 ; //(float)0.5/simWidth;
 	for (int i = 0; i < colorIndexCount; i++){
 		if(i%4==0){ //top left of a quad
 			quadPoints[i].x = 2.0*(float)idxCol/simWidth - 1.0f + halfWidth;
@@ -62,23 +65,38 @@ int main(int argc, char *argv[])
 
 	size_t latticeSize = realIndexCount*sizeof(float2);
 	float2 *devPositions; float2 *devVelocities;
+	float2 *devVelocities2; 
 	float2 *positions = (float2*)malloc(latticeSize);
 	float2 *velocities = (float2*)malloc(latticeSize);
 	checkCuda(cudaMalloc((void**)&devPositions, latticeSize));
 	checkCuda(cudaMalloc((void**)&devVelocities, latticeSize));
+	checkCuda(cudaMalloc((void**)&devVelocities2, latticeSize));
 
-	halfHeight = yRange/simHeight;
-	halfWidth = xRange/simWidth;
 	for (int row = 0; row < simHeight; row++){
 		for (int col = 0; col < simWidth; col++){
-			positions[row*simWidth+col].x = xRange*(float)col/simWidth - xRange/2.0 + halfWidth;
-			positions[row*simWidth+col].y = yRange*(float)row/simHeight - yRange/2.0 + halfHeight;
+			positions[row*simWidth+col].x = xRange*(float)col/simWidth - xRange/2.0;
+			positions[row*simWidth+col].y = yRange/2.0 - yRange*(float)row/simHeight;
 			velocities[row*simWidth+col].x = frameVel;
+			/*
+			if(row*simWidth+col > simWidth*(simHeight/2) && row*simWidth+col < simWidth*(simHeight/2)+20)
+				velocities[row*simWidth+col].x = frameVel + 10;
+			*/
+
 			velocities[row*simWidth+col].y = 0.0;
 		}
 	}
+	for(int i = 0; i < 2; i++){
+		velocities[simWidth * simHeight/2 + i*simWidth + simWidth/2].x = 15.0;
+	}
+	
+	float4 boundaries = make_float4(positions[0].x, positions[simWidth*simHeight-1].y,
+									positions[simWidth*simHeight-1].x, positions[0].y);
+	float dr = xRange/simWidth;
+	cout<<"	dR resolution: "<<dr<<" Meters"<<endl;
+
 	checkCuda(cudaMemcpy(devPositions, positions, latticeSize, cudaMemcpyHostToDevice));
 	checkCuda(cudaMemcpy(devVelocities, velocities, latticeSize, cudaMemcpyHostToDevice));
+	checkCuda(cudaMemcpy(devVelocities2, velocities, latticeSize, cudaMemcpyHostToDevice));
 
 			/////////*** GLEW Initialization, quarter window ***/////////
 
@@ -86,7 +104,7 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "ERROR: could not start GLFW3\n");
 		return 1;
 	} 
-	GLFWwindow* window = glfwCreateWindow(1920/2, 1080/2, "Cuda Fluid Dynamics", NULL, NULL);
+	GLFWwindow* window = glfwCreateWindow(1920/(1.5), 1080/(1.5), "Cuda Fluid Dynamics", NULL, NULL);
 	glfwSetWindowPos(window, 1920/2, 0);
 	if (!window) {
 		fprintf(stderr, "ERROR: could not open window with GLFW3\n");
@@ -137,23 +155,40 @@ int main(int argc, char *argv[])
 	
 			/////////*** Draw Loop ***/////////
 	
-	float simTime = 0.0;
-	float dt = 0.1;
 	cudaEvent_t start, stop; 
 	float fpsTime;
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
 	
-	dim3 tpb(0, 0);
+	dim3 tpbColor(0, 0);
+	dim3 tpbLattice(0, 0);
 	dim3 blocks(0, 0);
-	initThreadDimensions(simWidth, simHeight, tpb, blocks);
+	initThreadDimensions(simWidth, simHeight, tpbColor, tpbLattice, blocks);
+	cout<<"	Calling with Boundaries: "<<boundaries.x<<" "<<boundaries.y<<" "<<boundaries.z<<" "<<boundaries.w<<endl;
 
-	while(!glfwWindowShouldClose(window)) {
+	bool test = false;
+	//int j = 0;
+	while(!glfwWindowShouldClose(window) && !test) {
 		cudaEventRecord(start, 0);
-		simTime+=dt;
-		runCuda(&cudaColorResource, simTime, tpb, blocks, simWidth, simHeight);
+		//sleep(1);
 
-		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+			// Run all CUDA kernels including colorization of the linked resource
+		/*
+		for(int i = simWidth*simHeight/2; i < simWidth*simHeight/2 + 30; i++)
+			cout<<"vel: "<< velocities[i].x <<endl;
+			if(j==3)
+				test = true;
+		cout<<endl;
+		j++;*/
+
+		runCuda(&cudaColorResource, 
+				devPositions, devVelocities, devVelocities2,
+				boundaries, dt, dr, 
+				tpbColor, tpbLattice, blocks, 
+				simWidth, simHeight);
+		// TESTING 
+		checkCuda(cudaMemcpy(velocities, devVelocities2, latticeSize, cudaMemcpyDeviceToHost));
+				glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		glUseProgram(shaderProgram);
 		glBindVertexArray(vertexArray);
 		glDrawArrays(GL_QUADS, 0, colorIndexCount);
@@ -180,6 +215,7 @@ int main(int argc, char *argv[])
 	glDeleteVertexArrays(1, &vertexArray);
 	cudaFree(devVelocities);
 	cudaFree(devPositions);
+	cudaFree(devVelocities2);
 	free(quadPoints);
 	free(velocities);
 	free(positions);

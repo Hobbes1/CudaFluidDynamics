@@ -19,6 +19,16 @@
 #define rowColIdx row*simWidth+col
 #define REFRESH_DELAY 10 
 
+#define gpuErrCheck(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t result, const char *file, int line, bool abort=true)
+{
+	if(result != cudaSuccess)
+	{
+		fprintf(stderr, "GPUAssert: %s %s %d\n", cudaGetErrorString(result), file, line);
+		if (abort) exit(result);
+	}
+}
+
 inline 
 cudaError_t checkCuda(cudaError_t result){
 	if (result != cudaSuccess){
@@ -46,8 +56,10 @@ const char *fragmentShaderText =
 "	fragmentColor = vec4(color, 1.0);"
 "}";
 
-__global__ void testKernel(float3 *colors,
-		   float time,
+
+__global__ void 
+velToColor(float3 *__restrict__ colors, 
+		   float2 *__restrict__ newVel,
 		   dim3 blocks,
 		   unsigned int simWidth,
 		   unsigned int simHeight);
@@ -60,11 +72,18 @@ void runSim(GLuint c_vbo,
 			unsigned int simHeight);
 
 void runCuda(struct cudaGraphicsResource **vboResource,
-			 float time, 
-			 dim3 tpb,
+			 float2 *devPositions,
+			 float2 *devVelocities,
+			 float2 *devVelocities2,
+			 float4 boundaries,
+			 float dt,
+			 float dr,
+			 dim3 tpbColor,
+			 dim3 tpbLattice,
 			 dim3 blocks,
 			 unsigned int simWidth,
 			 unsigned int simHeight);
+
 
 void glInitShaders(const char *vertexShaderText,
 			 	   const char *fragmentShaderText,
