@@ -1,15 +1,22 @@
-#include "fluidsCuda.h"
+#include "fluidsCuda.h" 
 #include "fluidsCuda.cu"
 using namespace std;
 
 int main(int argc, char *argv[])
 {
-	unsigned int simWidth = 128;	// x divisions
-	unsigned int simHeight = 128;// y divisions
+	unsigned int simWidth = 256;	// x divisions
+	unsigned int simHeight = 256;// y divisions
 									// note: 6mx6m with 256x256 yields ~square inch resolution
 	float xRange = 6.0; 			// meters
 	float yRange = 6.0;				// meters
-	float frameVel = 7.0;			// speed of object, right to left
+	float frameVel = -3.0;			// speed of object, right to left
+
+
+		// testing parameters, TODO to be removed 
+	unsigned int testX = simWidth - 10;
+	unsigned int testY = simHeight - 10;
+	bool test = false;
+	int testNum = 300;
 
 	float dt = 0.001;
 
@@ -77,23 +84,64 @@ int main(int argc, char *argv[])
 			positions[row*simWidth+col].x = xRange*(float)col/simWidth - xRange/2.0;
 			positions[row*simWidth+col].y = yRange/2.0 - yRange*(float)row/simHeight;
 			velocities[row*simWidth+col].x = frameVel;
-			/*
-			if(row*simWidth+col > simWidth*(simHeight/2) && row*simWidth+col < simWidth*(simHeight/2)+20)
-				velocities[row*simWidth+col].x = frameVel + 10;
-			*/
-
 			velocities[row*simWidth+col].y = 0.0;
+			if( row == 0 || row == simHeight - 1)
+			{
+				velocities[row*simWidth+col].x = 0.0;
+				velocities[row*simWidth+col].y = 0.0;
+			}
+			/*
+			if( row > 3*simHeight/4 && row < 3*simHeight/4 + 10 && col > simWidth/4 && col < simWidth/4 + 10)
+			{
+				velocities[row*simWidth+col].x = 5.0;
+				velocities[row*simWidth+col].y = 4.0;
+			}*/
+				
 		}
 	}
-	for(int i = 0; i < 2; i++){
-		velocities[simWidth * simHeight/2 + i*simWidth + simWidth/2].x = 15.0;
-	}
+			// TODO special velocity bit for now, visualization */
+
+	/*
+	for(int i = 0; i < 5; i++){
+		velocities[simWidth * simHeight/2 + i*simWidth + simWidth/2].x = 0.0;
+	}*/
 	
 	float4 boundaries = make_float4(positions[0].x, positions[simWidth*simHeight-1].y,
 									positions[simWidth*simHeight-1].x, positions[0].y);
 	float dr = xRange/simWidth;
 	cout<<"	dR resolution: "<<dr<<" Meters"<<endl;
 
+			/////////*** Load color map data ***/////////
+
+	float3* devColorMap;
+	checkCuda(cudaMalloc((void**)&devColorMap, 256*sizeof(float3)));
+	float3* colorMap = (float3*)malloc(256*sizeof(float3));
+	std::ifstream colorfile("data/Gwyd_Color_Map", ifstream::in);
+	std::string line;
+	int i = 0;
+	while(getline(colorfile, line)){
+		std::stringstream linestream(line);
+		linestream >> colorMap[i].x >> colorMap[i].y >> colorMap[i].z;
+		i++;
+	}
+
+			/////////*** Load Obstructed Data ***/////////
+	int* obstructed = (int*)malloc(16*sizeof(int));
+	int* devObstructed;
+	checkCuda(cudaMalloc((void**)&devObstructed, 16*sizeof(int)));
+
+	for(int i = 0; i < 16; i++){
+		obstructed[i] = simHeight*(simWidth+i)/2 + simWidth/2 + i;
+	}
+	testX = simWidth/4 + 1;
+	testY = simHeight/2; 
+	for(int i = 0; i < 16; i++){
+		velocities[obstructed[i]].x = 0.0;
+		velocities[obstructed[i]].y = 0.0;
+	}
+
+	checkCuda(cudaMemcpy(devObstructed, obstructed, 16*sizeof(int), cudaMemcpyHostToDevice));
+	checkCuda(cudaMemcpy(devColorMap, colorMap, 256*sizeof(float3), cudaMemcpyHostToDevice));
 	checkCuda(cudaMemcpy(devPositions, positions, latticeSize, cudaMemcpyHostToDevice));
 	checkCuda(cudaMemcpy(devVelocities, velocities, latticeSize, cudaMemcpyHostToDevice));
 	checkCuda(cudaMemcpy(devVelocities2, velocities, latticeSize, cudaMemcpyHostToDevice));
@@ -166,26 +214,26 @@ int main(int argc, char *argv[])
 	initThreadDimensions(simWidth, simHeight, tpbColor, tpbLattice, blocks);
 	cout<<"	Calling with Boundaries: "<<boundaries.x<<" "<<boundaries.y<<" "<<boundaries.z<<" "<<boundaries.w<<endl;
 
-	bool test = false;
-	//int j = 0;
-	while(!glfwWindowShouldClose(window) && !test) {
+	bool thing = true;
+	int j = 0;
+	while(!glfwWindowShouldClose(window) && thing) {
 		cudaEventRecord(start, 0);
 		//sleep(1);
 
 			// Run all CUDA kernels including colorization of the linked resource
-		/*
-		for(int i = simWidth*simHeight/2; i < simWidth*simHeight/2 + 30; i++)
-			cout<<"vel: "<< velocities[i].x <<endl;
-			if(j==3)
-				test = true;
+		if(j==testNum && test == true){
+			test = false;
+			thing = false;
+		}
+			
 		cout<<endl;
-		j++;*/
+		j++;
 
-		runCuda(&cudaColorResource, 
+		runCuda(&cudaColorResource, devObstructed, devColorMap, 
 				devPositions, devVelocities, devVelocities2,
 				boundaries, dt, dr, 
 				tpbColor, tpbLattice, blocks, 
-				simWidth, simHeight);
+				simWidth, simHeight, testX, testY, test);
 		// TESTING 
 		checkCuda(cudaMemcpy(velocities, devVelocities2, latticeSize, cudaMemcpyDeviceToHost));
 				glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -213,10 +261,14 @@ int main(int argc, char *argv[])
 	glDeleteBuffers(1, &pointsVBO);
 	glDeleteBuffers(1, &colorsVBO);
 	glDeleteVertexArrays(1, &vertexArray);
+	cudaFree(devObstructed);
 	cudaFree(devVelocities);
 	cudaFree(devPositions);
 	cudaFree(devVelocities2);
+	cudaFree(devColorMap);
 	free(quadPoints);
+	free(obstructed);
+	free(colorMap);
 	free(velocities);
 	free(positions);
 	free(colors);

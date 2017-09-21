@@ -10,6 +10,8 @@
 #include <unistd.h>
 #include <iostream>
 #include <assert.h>
+#include <fstream>
+#include <sstream>
 
 #include <GL/freeglut.h>
 
@@ -57,8 +59,13 @@ const char *fragmentShaderText =
 "}";
 
 
+__global__ void
+Obstruct(int *__restrict__ obstructed,
+		 float2 *__restrict__ oldVel);
+
 __global__ void 
 velToColor(float3 *__restrict__ colors, 
+		   float3 *colorMap,
 		   float2 *__restrict__ newVel,
 		   dim3 blocks,
 		   unsigned int simWidth,
@@ -72,6 +79,8 @@ void runSim(GLuint c_vbo,
 			unsigned int simHeight);
 
 void runCuda(struct cudaGraphicsResource **vboResource,
+			 int *obstructed,
+			 float3 *colorMap,
 			 float2 *devPositions,
 			 float2 *devVelocities,
 			 float2 *devVelocities2,
@@ -82,7 +91,39 @@ void runCuda(struct cudaGraphicsResource **vboResource,
 			 dim3 tpbLattice,
 			 dim3 blocks,
 			 unsigned int simWidth,
-			 unsigned int simHeight);
+			 unsigned int simHeight,
+			 unsigned int testX,
+			 unsigned int testY,
+			 bool test);
+
+__global__ void 
+updateVel(float2 *__restrict__ oldVel,
+		  float2 *__restrict__ newVel,
+		  unsigned int simWidth);
+
+__device__ float2
+BiLinInterp(float2 pos,
+ 		 	 float2 TLVel, float2 TLPos,
+			 float2 BLVel, float2 BLPos,
+			 float2 BRVel, float2 BRPos,
+			 float2 TRVel, float2 TRPos,
+			 float dr);
+
+__device__ float2
+LinInterp(float2 pos,
+			 float2 LVel, float2 LPos,
+			 float2 RVel, float2 RPos,
+			 float dr);
+
+__device__ float2
+JacobiInstance(float2 Top, 
+			   float2 Left,
+			   float2 Bot,
+			   float2 Right,
+			   float Alpha,
+			   float2 Val);
+
+
 
 
 void glInitShaders(const char *vertexShaderText,
