@@ -9,7 +9,7 @@ int main(int argc, char *argv[])
 									// note: 6mx6m with 256x256 yields ~square inch resolution
 	float xRange = 6.0; 			// meters
 	float yRange = 6.0;				// meters
-	float frameVel = -3.0;			// speed of object, right to left
+	float2 frameVel = make_float2(0.002, 0.0);			// speed of object, right to left
 
 
 		// testing parameters, TODO to be removed 
@@ -18,12 +18,13 @@ int main(int argc, char *argv[])
 	bool test = false;
 	int testNum = 300;
 
-	float dt = 0.001;
+	float dt = 10.1;
 
 	int colorIndexCount = simWidth * simHeight * 4;
 	int realIndexCount = simWidth * simHeight;
-	cout <<"	frameVel will cover "<<frameVel*dt/(xRange/simWidth)<<" quads" <<endl;
-
+	cout <<"	frameVel will cover "<<frameVel.x*dt/(xRange/simWidth)<<" quads" <<endl;
+	int z;
+	cin >> z;
 			/////////*** Quad Vertices and Color data, 4x as large as real data ***/////////
 
 	float3 *quadPoints = (float3*)malloc(colorIndexCount*sizeof(float3));
@@ -70,42 +71,60 @@ int main(int argc, char *argv[])
 
 			// I don't bother w/ cuda malloc on host because I don't plan on data transfers
 
-	size_t latticeSize = realIndexCount*sizeof(float2);
-	float2 *devPositions; float2 *devVelocities;
-	float2 *devVelocities2; 
-	float2 *positions = (float2*)malloc(latticeSize);
-	float2 *velocities = (float2*)malloc(latticeSize);
-	checkCuda(cudaMalloc((void**)&devPositions, latticeSize));
-	checkCuda(cudaMalloc((void**)&devVelocities, latticeSize));
-	checkCuda(cudaMalloc((void**)&devVelocities2, latticeSize));
+	size_t latticeFieldSize = realIndexCount*sizeof(float2);
+	size_t latticeScalarSize = realIndexCount*sizeof(float);
 
+			// All fields for the device
+	// vector fields
+	float2 *devPositions; 
+	float2 *devVelocities;
+	float2 *devVelocities2;
+	float2 *devGradPressure;
+	// scalar fields
+	float *devDivVelocity; 
+	float *devPressure;
+
+			// All fields for the Host
+	// vector fields
+	float2 *positions = (float2*)malloc(latticeFieldSize);
+	float2 *velocities = (float2*)malloc(latticeFieldSize);
+	float2 *gradPressure = (float2*)malloc(latticeFieldSize);
+	// scalar fields
+	float *divVelocity = (float*)malloc(latticeScalarSize);
+	float *pressure = (float*)malloc(latticeScalarSize);
+
+	// allocate fields for the device
+	checkCuda(cudaMalloc((void**)&devPositions, latticeFieldSize));
+	checkCuda(cudaMalloc((void**)&devVelocities, latticeFieldSize));
+	checkCuda(cudaMalloc((void**)&devVelocities2, latticeFieldSize));
+	checkCuda(cudaMalloc((void**)&devGradPressure, latticeFieldSize));
+
+
+	checkCuda(cudaMalloc((void**)&devDivVelocity, latticeScalarSize));
+	checkCuda(cudaMalloc((void**)&devPressure, latticeScalarSize));
+	cout << "main 1" << endl;
 	for (int row = 0; row < simHeight; row++){
 		for (int col = 0; col < simWidth; col++){
 			positions[row*simWidth+col].x = xRange*(float)col/simWidth - xRange/2.0;
 			positions[row*simWidth+col].y = yRange/2.0 - yRange*(float)row/simHeight;
-			velocities[row*simWidth+col].x = frameVel;
-			velocities[row*simWidth+col].y = 0.0;
+			velocities[row*simWidth+col].x = frameVel.x;
+			velocities[row*simWidth+col].y = frameVel.y;
+			divVelocity[row*simWidth+col] = 0.0;
+			gradPressure[row*simWidth+col] = make_float2(0.0, 0.0);
+			
+			/*
 			if( row == 0 || row == simHeight - 1)
 			{
 				velocities[row*simWidth+col].x = 0.0;
 				velocities[row*simWidth+col].y = 0.0;
 			}
-			/*
-			if( row > 3*simHeight/4 && row < 3*simHeight/4 + 10 && col > simWidth/4 && col < simWidth/4 + 10)
-			{
-				velocities[row*simWidth+col].x = 5.0;
-				velocities[row*simWidth+col].y = 4.0;
-			}*/
-				
+			*/
+			pressure[row*simWidth+col] = 0.0;
 		}
 	}
-			// TODO special velocity bit for now, visualization */
+	cout << "main 2" << endl;
 
-	/*
-	for(int i = 0; i < 5; i++){
-		velocities[simWidth * simHeight/2 + i*simWidth + simWidth/2].x = 0.0;
-	}*/
-	
+
 	float4 boundaries = make_float4(positions[0].x, positions[simWidth*simHeight-1].y,
 									positions[simWidth*simHeight-1].x, positions[0].y);
 	float dr = xRange/simWidth;
@@ -125,26 +144,37 @@ int main(int argc, char *argv[])
 		i++;
 	}
 
+
 			/////////*** Load Obstructed Data ***/////////
 	int* obstructed = (int*)malloc(16*sizeof(int));
 	int* devObstructed;
 	checkCuda(cudaMalloc((void**)&devObstructed, 16*sizeof(int)));
 
 	for(int i = 0; i < 16; i++){
-		obstructed[i] = simHeight*(simWidth+i)/2 + simWidth/2 + i;
+		obstructed[i] = (simHeight*(simWidth/2) + simWidth/5 + i*simWidth);
 	}
+	
 	testX = simWidth/4 + 1;
-	testY = simHeight/2; 
+	testY = simHeight/2;
+	
 	for(int i = 0; i < 16; i++){
 		velocities[obstructed[i]].x = 0.0;
 		velocities[obstructed[i]].y = 0.0;
 	}
 
+	cout << "main 2" << endl;
+
 	checkCuda(cudaMemcpy(devObstructed, obstructed, 16*sizeof(int), cudaMemcpyHostToDevice));
 	checkCuda(cudaMemcpy(devColorMap, colorMap, 256*sizeof(float3), cudaMemcpyHostToDevice));
-	checkCuda(cudaMemcpy(devPositions, positions, latticeSize, cudaMemcpyHostToDevice));
-	checkCuda(cudaMemcpy(devVelocities, velocities, latticeSize, cudaMemcpyHostToDevice));
-	checkCuda(cudaMemcpy(devVelocities2, velocities, latticeSize, cudaMemcpyHostToDevice));
+	checkCuda(cudaMemcpy(devPositions, positions, latticeFieldSize, cudaMemcpyHostToDevice));
+	checkCuda(cudaMemcpy(devVelocities, velocities, latticeFieldSize, cudaMemcpyHostToDevice));
+	checkCuda(cudaMemcpy(devVelocities2, velocities, latticeFieldSize, cudaMemcpyHostToDevice));
+	checkCuda(cudaMemcpy(devGradPressure, gradPressure, latticeFieldSize, cudaMemcpyHostToDevice));
+	
+	checkCuda(cudaMemcpy(devPressure, pressure, latticeScalarSize, cudaMemcpyHostToDevice));
+	checkCuda(cudaMemcpy(devDivVelocity, divVelocity, latticeScalarSize, cudaMemcpyHostToDevice));
+	cout << "main 2" << endl;
+
 
 			/////////*** GLEW Initialization, quarter window ***/////////
 
@@ -205,6 +235,7 @@ int main(int argc, char *argv[])
 	
 	cudaEvent_t start, stop; 
 	float fpsTime;
+	float simTime = 0.0;
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
 	
@@ -216,9 +247,11 @@ int main(int argc, char *argv[])
 
 	bool thing = true;
 	int j = 0;
+	cout << "main 3" << endl;
+
 	while(!glfwWindowShouldClose(window) && thing) {
 		cudaEventRecord(start, 0);
-		//sleep(1);
+		//sleep(1);f
 
 			// Run all CUDA kernels including colorization of the linked resource
 		if(j==testNum && test == true){
@@ -229,13 +262,29 @@ int main(int argc, char *argv[])
 		cout<<endl;
 		j++;
 
-		runCuda(&cudaColorResource, devObstructed, devColorMap, 
-				devPositions, devVelocities, devVelocities2,
-				boundaries, dt, dr, 
-				tpbColor, tpbLattice, blocks, 
-				simWidth, simHeight, testX, testY, test);
+		runCuda(
+			&cudaColorResource, 
+			devObstructed, 
+			devColorMap, 
+			devPositions, 
+			devVelocities, 
+			devVelocities2, 
+			devGradPressure, 
+			devDivVelocity, 
+			devPressure,
+			boundaries, 
+			dt, 
+			dr, 
+			frameVel, 
+			tpbColor, 
+			tpbLattice, 
+			blocks, 
+			simWidth, 
+			simHeight, 
+			testX, testY, test);
+
 		// TESTING 
-		checkCuda(cudaMemcpy(velocities, devVelocities2, latticeSize, cudaMemcpyDeviceToHost));
+		checkCuda(cudaMemcpy(velocities, devVelocities2, latticeFieldSize, cudaMemcpyDeviceToHost));
 				glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		glUseProgram(shaderProgram);
 		glBindVertexArray(vertexArray);
@@ -247,8 +296,9 @@ int main(int argc, char *argv[])
 		cudaEventRecord(stop, 0);
 		cudaEventSynchronize(stop);
 		cudaEventElapsedTime(&fpsTime, start, stop);
+		simTime += dt;
 		char title[256];
-		sprintf(title, "CudaFluidDynamics: %12.2f fps", 1.0f/(fpsTime/1000.0f));
+		sprintf(title, "CudaFluidDynamics: %12.2f fps, simulation time: %12.4f seconds", 1.0f/(fpsTime/1000.0f), simTime);
 		glfwSetWindowTitle(window, title);
 
 		
@@ -261,17 +311,26 @@ int main(int argc, char *argv[])
 	glDeleteBuffers(1, &pointsVBO);
 	glDeleteBuffers(1, &colorsVBO);
 	glDeleteVertexArrays(1, &vertexArray);
+
 	cudaFree(devObstructed);
 	cudaFree(devVelocities);
+	cudaFree(devDivVelocity);
 	cudaFree(devPositions);
 	cudaFree(devVelocities2);
+	cudaFree(devGradPressure);
+	cudaFree(devPressure);
 	cudaFree(devColorMap);
+
+	free(divVelocity);
+	free(gradPressure);
 	free(quadPoints);
 	free(obstructed);
 	free(colorMap);
 	free(velocities);
 	free(positions);
 	free(colors);
+
 	glfwTerminate();
+
 	return 0;
 }

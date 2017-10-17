@@ -5,24 +5,64 @@
 			 * by velocity data directly in the future */
 
 __global__ void
-velToColor(float3 *colors,
-		   float3 *colorMap,
-		   float2 *__restrict__ newVel,
-		   dim3 blocks,
-		   unsigned int simWidth,
-		   unsigned int simHeight)
+colorScalarField(
+	float3 *colors,
+    float3 *colorMap,
+    float *__restrict__ field,
+    dim3 blocks,
+    unsigned int simWidth,
+    unsigned int simHeight)
+{
+	unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+	unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+
+
+	int quadIdx = x + simWidth*y;
+	if (x == simWidth/2 + 10 && y == simWidth/2 + 10)
+		printf("coloring scalar field values on the order of: %f\n", field[quadIdx]);
+
+	int map = (int)((field[quadIdx])/0.000001 * 255 + 125);
+	if(map > 255) { map = 255; }
+	if(map < 0) {map = 0; }
+
+	for(int i = 0; i < 4; i++){
+		colors[4*quadIdx+i] = colorMap[map];
+	}
+}
+
+__global__ void
+colorVectorField(
+	float3 *colors,
+    float3 *colorMap,
+    float2 *__restrict__ field,
+    dim3 blocks,
+    unsigned int simWidth,
+    unsigned int simHeight)
 {
 	unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
 	unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
 
 	int quadIdx = x + simWidth*y;
-	float magVel = sqrt(newVel[quadIdx].x * newVel[quadIdx].x + newVel[quadIdx].y * newVel[quadIdx].y);
-	int map10_256 = (int)(magVel/7.0 * 256);
-	if(map10_256 > 256) { map10_256 = 256; }
-
+	if (x == simWidth/2 + 10 && y == simWidth/2 + 10)
+		printf("coloring vector field values on the order of: %f, %f\n", field[quadIdx].x, field[quadIdx].y);
+	
+	//float mag = sqrt(field[quadIdx].x * field[quadIdx].x + field[quadIdx].y * field[quadIdx].y);
+	float mag = field[quadIdx].x;
+	int map = (int)(mag/0.004* 256);
+	if(map > 255) { map = 255; }
+	if(map < 0) { map = 0; }
 
 	for(int i = 0; i < 4; i++){
-		colors[4*quadIdx+i] = colorMap[map10_256];
+		colors[4*quadIdx+i] = colorMap[map];
+		if (field[quadIdx].x == 0)
+		{
+			colors[4*quadIdx+i] = make_float3(0.0, 0.6, 0.2);
+		}
+		if (mag < 0)
+		{
+			colors[4*quadIdx+i] = make_float3(0.0, 0.3, 0.7);
+		}
 	}
 
 	/*
@@ -52,14 +92,14 @@ Obstruct(int *__restrict__ obstructed,
 			 * diffusion. Should be called for a number of iterations */
 
 __global__ void
-Diffuse(float2 *__restrict__ positions,
-		float2 *__restrict__ oldVel,
-		float2 *__restrict__ newVel,
-		float dt,
-		float dr,
-		float viscosity,
-		unsigned int simWidth,
-		unsigned int simHeight)
+DiffusionJacobi(float2 *__restrict__ positions,
+				float2 *__restrict__ oldVel,
+				float2 *__restrict__ newVel,
+				float dt,
+				float dr,
+				float viscosity,
+				unsigned int simWidth,
+				unsigned int simHeight)
 {
 	unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
 	unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -73,16 +113,145 @@ Diffuse(float2 *__restrict__ positions,
 
 	if (x!=0 && y!=0 && x!=simWidth-1 && y!=simHeight-1)
 	{
+
 		TVel = oldVel[(y-1)*simWidth + x];
 		LVel = oldVel[(y*simWidth) + x - 1];
 		BVel = oldVel[(y+1)*simWidth + x];
 		RVel = oldVel[(y*simWidth) + x + 1];
 
-		newVel[y*simWidth + x] = JacobiInstance(TVel, LVel, 
+		newVel[y*simWidth + x] = JacobiFieldInstance(TVel, LVel, 
 												BVel, RVel,
 												alpha, Vel);
 	}
 }
+
+			/* One iteration of the jacobi method to solve for 
+			* the scalar pressure field from the divergence of 
+			* the preliminary velocity field: del^2 [P] = div [W]
+			*
+			* Note that after the first full simulation cycle, the previoius
+			* time-step's pressure is used as the initial guess */
+
+__global__ void
+PressureJacobi(float *__restrict__ divVel,
+			   float *__restrict__ pressure,
+			   float dr, 
+			   unsigned int simWidth,
+			   unsigned int simHeight)
+{
+	unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+	unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+
+	float Div;
+	float TDiv;
+	float LDiv;
+	float BDiv;
+	float RDiv;
+	float Alpha = -1 * dr * dr;
+
+	// TODO pressure at edge cases should be non-zero, base on out-of-bounds values
+	if (x!=0 && y!=0 && x!=simWidth-1 && y!=simHeight-1)
+	{
+		Div = divVel[y*simWidth + x];
+		TDiv = pressure[(y-1)*simWidth + x];
+		LDiv = pressure[(y*simWidth) + x - 1];
+		BDiv = pressure[(y+1)*simWidth + x];
+		RDiv = pressure[(y*simWidth) + x + 1];
+
+		pressure[y*simWidth + x] = JacobiScalarInstance(TDiv, LDiv, BDiv, RDiv, Alpha, Div);
+		//if(x==20 && y==simWidth/2)
+			//printf("got pressure %f\n", pressure[y*simWidth+x]);
+	}
+}
+
+
+			/* Calculates the divergence of the velocity field 
+			 * and stores it in divVel for use in calculating the 
+			 * pressure field by the Poisson pressure equation, which 
+			 * takes it as input */
+
+__global__ void
+Divergence(float2 *__restrict__ newVel, 
+		   float *__restrict__ divVel,
+		   float dr,
+		   float2 frameVel,
+		   unsigned int simWidth)
+{
+	unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+	unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+	int left = y*simWidth+x-1;
+	int right = y*simWidth+x+1;
+	int top = (y-1)*simWidth+x;
+	int bottom = (y+1)*simWidth+x;
+			
+		// Center bulk cases
+	if (x!=0 && y!=0 && x!=simWidth-1 && y!=simWidth-1)
+	{
+		divVel[y*simWidth+x] = (newVel[left].x - newVel[right].x) / 2 * dr + 
+						   	   (newVel[top].y - newVel[bottom].y) / 2 * dr;
+		return;
+	}
+
+		// All boundary conditions, assuming that all disturbing features
+		// are far away from the boundary, we can assign the gradient to be
+		// zero in these cases.
+	divVel[y*simWidth+x] = 0.0;
+
+}
+
+
+			/* Calculates the gradient of a scalar field to store in 
+			 * "gradient". Used to find grad[P] to subtract from the 
+			 * divergent velocity field in the final step of the algorithm */
+
+__global__ void
+Gradient(float *__restrict__ field,
+		 float2 *__restrict__ gradient,
+		 float2 frameVel,
+		 float dr,
+		 unsigned int simWidth)
+{
+	unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+	unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+
+	int left = y*simWidth+x-1;
+	int right = y*simWidth+x+1;
+	int top = (y-1)*simWidth+x;
+	int bottom = (y+1)*simWidth+x;
+
+		// Center bulk cases
+	if (x!=0 && y!=0 && x!=simWidth-1 && y!=simWidth-1)
+	{
+		gradient[y*simWidth+x].x = (field[right] - field[left]) / (2.0 * dr);
+		gradient[y*simWidth+x].y = (field[top] - field[bottom]) / (2.0 * dr);
+		return;
+	}
+		// All boundary conditions, assuming that all disturbing features
+		// are far away from the boundary, we can assign the gradient to be
+		// zero in these cases.
+	gradient[y*simWidth+x] = make_float2(0.0, 0.0);
+}
+
+
+			/* Finall projection operation, after which newVel
+			 * is divergent free by the helmholtz theorem. */
+
+__global__ void
+Projection(float2 *__restrict__ newVel,
+		   float2 *__restrict__ gradPressure,
+		   unsigned int simWidth)
+{
+	unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+	unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+	newVel[y*simWidth+x].x -= gradPressure[y*simWidth+x].x;
+	newVel[y*simWidth+x].y -= gradPressure[y*simWidth+x].y;
+}
+
+		   
 
 			/* Advection method, utilizes backtracing to update
 			 * velocities at each point on the lattice. Some 
@@ -110,6 +279,7 @@ __global__ void
 Advect(float2 *__restrict__ positions,
 	   float2 *__restrict__ oldVel, 
 	   float2 *__restrict__ newVel,
+	   float2 frameVel,
 	   float dt,
 	   float dr,
 	   float4 boundaries,
@@ -149,17 +319,6 @@ Advect(float2 *__restrict__ positions,
 	tracedPos.y = positions[y*simWidth+x].y - oldVel[y*simWidth+x].y * dt;
 	if(y==testY && x==testX && test==true){
 		printf("tracedPos.x : %f  - tracedPos.y : %f\n", tracedPos.x, tracedPos.y);
-	}
-	if(x==testX && y==testY && test==true){
-		//printf("happeneddddddd");
-	}
-
-			// Top and Bottom held to zero as boundary condition
-	
-	if(y==0 || y==simHeight-1)
-	{
-		oldVel[y*simWidth+x] = make_float2(0.0, 0.0);
-		return;
 	}
 
 				// change in realQuad position
@@ -238,14 +397,18 @@ Advect(float2 *__restrict__ positions,
 			printf("Final lattice point is doing things \n\n");
 		*/
 	}
+	else
+	{
+		newVel[y*simWidth+x] = frameVel;
+		return;
+	}
 		// Traced Position beyond LEFT hand boundary (x)
 
 	if(tracedPos.x < boundaries.x &&
 	   tracedPos.x < boundaries.z)
 	{
-		newVel[y*simWidth+x] = oldVel[y*simWidth+x];
-		//newVel[y*simWidth+x].x = 3.0;
-		//newVel[y*simWidth+x].y = 0.0;
+		//newVel[y*simWidth+x] = oldVel[y*simWidth+x];
+		newVel[y*simWidth+x] = frameVel;
 		return;
 	}
 
@@ -254,12 +417,7 @@ Advect(float2 *__restrict__ positions,
 	if(tracedPos.x > boundaries.x && 
 	   tracedPos.x > boundaries.z)
 	{
-		//newVel[y*simWidth+x] = oldVel[y*simWidth+x];
-		
-		newVel[y*simWidth+x].x = -5.0;
-		newVel[y*simWidth+x].y = 0.0;
-		
-
+		newVel[y*simWidth+x] = oldVel[y*simWidth+x];	
 		return;
 	}
 
@@ -270,23 +428,9 @@ Advect(float2 *__restrict__ positions,
 	   tracedPos.x > boundaries.x &&
 	   tracedPos.x < boundaries.z)
 	{
-
-		//printf("top boundary indexes : %i %i \n",  TLTracedPosIdx, TRTracedPosIdx);
-		if(checkPosIdx(TLTracedPosIdx, simWidth, simHeight) && 
-		   checkPosIdx(TRTracedPosIdx, simWidth, simHeight)){
-
-		float2 LPos = positions[ TLTracedPosIdx ];
-		float2 RPos = positions[ TRTracedPosIdx ];
-
-		float2 LVel = oldVel[ TLTracedPosIdx ];
-		float2 RVel = oldVel[ TRTracedPosIdx ];
-
-		newVel[y*simWidth+x] = LinInterp(tracedPos, 	
-										 LVel, LPos,
-										 RVel, RPos,
-										 dr);
-		}
+		newVel[y*simWidth+x] = make_float2(0.0,0.0);
 		return;
+
 	}
 
 		// Traced Position beyond BOTTOM boundary (y)
@@ -296,22 +440,7 @@ Advect(float2 *__restrict__ positions,
 	   tracedPos.x > boundaries.x &&
 	   tracedPos.x < boundaries.z)
 	{
-		
-		//printf("bottom boundary indexes : %i %i \n",  TLTracedPosIdx, TRTracedPosIdx);
-		if(checkPosIdx(TLTracedPosIdx, simWidth, simHeight) && 
-		   checkPosIdx(TRTracedPosIdx, simWidth, simHeight)){
-
-		float2 LPos = positions[ TLTracedPosIdx ];
-		float2 RPos = positions[ TRTracedPosIdx ];
-
-		float2 LVel = oldVel[ TLTracedPosIdx ];
-		float2 RVel = oldVel[ TRTracedPosIdx ];
-
-		newVel[y*simWidth+x] = LinInterp(tracedPos, 	
-										 LVel, LPos,
-										 RVel, RPos,
-										 dr);
-		}
+		newVel[y*simWidth+x] = make_float2(0.0,0.0);
 		return;
 	}
 }
@@ -332,14 +461,14 @@ updateVel(float2 *__restrict__ oldVel,
 
 			/* Didn't want to write out all these multiple entries
 			 * for float2 calculations every time */
-
+			// TODO can this be templated? float2 addition doesn't work nicely
 __device__ float2
-JacobiInstance(float2 Top, 
-			   float2 Left,
-			   float2 Bot,
-			   float2 Right,
-			   float Alpha,
-			   float2 Val)
+JacobiFieldInstance(float2 Top, 
+				 	float2 Left,
+				    float2 Bot,
+			   	    float2 Right,
+			   	    float Alpha,
+			  	    float2 Val)
 {
 	float2 res;
 	res.x = (Top.x + Left.x + Bot.x + Right.x + Alpha * Val.x) / (4 + Alpha);
@@ -347,6 +476,17 @@ JacobiInstance(float2 Top,
 	return res;
 }
 
+__device__ float
+JacobiScalarInstance(float Top,
+					 float Left,
+					 float Bot,
+					 float Right,
+					 float Alpha,
+					 float Val)
+{
+	return (Top + Left + Bot + Right + Alpha * Val) / 4.0;
+}
+					
 			/* Bilinear Interpolation of velocities at four nearest
 			 * mesh points giving the expected velocity at an arbitrary
 			 * point contained */
@@ -405,14 +545,18 @@ LinInterp(float2 pos,
 }
 
 void runCuda(struct cudaGraphicsResource **vboResource,
-			 int *obstructed,
-			 float3 *colorMap,
-			 float2 *pos,
-			 float2 *oldVel,
-			 float2 *newVel,
+			 int *__restrict__ obstructed,
+			 float3 *__restrict__ colorMap,
+			 float2 *__restrict__ pos,
+			 float2 *__restrict__ oldVel,
+			 float2 *__restrict__ newVel,
+			 float2 *__restrict__ gradPressure,
+			 float *__restrict__ divVel,
+			 float *__restrict__ pressure,
 			 float4 boundaries,
 			 float dt,
 			 float dr,
+			 float2 frameVel,
 			 dim3 tpbColor,
 			 dim3 tpbLattice,
 			 dim3 blocks,
@@ -426,33 +570,48 @@ void runCuda(struct cudaGraphicsResource **vboResource,
 	checkCuda(cudaGraphicsResourceGetMappedPointer((void**)&devPtr, &numBytes,
 												   *vboResource));
 
-	Obstruct<<<1, 16>>>(obstructed, oldVel);
 	
-	Advect<<< blocks, tpbLattice >>>(pos, oldVel, newVel, 
+	// (divergent) velocity [V0](t+dt) from backwards Euler: [V0](x,t+dt) = [V0](x-dt*[V0](x,t), t)  
+	Advect<<< blocks, tpbLattice >>>(pos, oldVel, newVel, frameVel,
 									 dt, dr, boundaries,
 									 simWidth, simHeight, testX, testY, test);
-	checkCuda(cudaPeekAtLastError());
-	checkCuda(cudaDeviceSynchronize());
+	Obstruct<<<1, 16>>>(obstructed, newVel);
 
 	updateVel<<< blocks, tpbLattice >>>(oldVel, newVel, simWidth);
-	checkCuda(cudaDeviceSynchronize());
 
-	
+
+
+	// (divergent) velocity [V1] from d[V1]/dt = (visc) * Del^2[V1]
 	float viscosity = 1.48e-5;
 	for (int i = 0; i < 40; i++){
-		Diffuse<<< blocks, tpbLattice >>> (pos, oldVel, newVel, 
+		DiffusionJacobi<<< blocks, tpbLattice >>> (pos, oldVel, newVel, 
 										   dt, dr, viscosity,
 										   simWidth, simHeight);
-		checkCuda(cudaPeekAtLastError());
 		updateVel<<< blocks, tpbLattice >>>(oldVel, newVel, simWidth);
-		//std::cout<<"	Running Jacobi Diffusion: "<<i<<std::endl;
+		Obstruct<<<1, 16>>>(obstructed, newVel);
 	}
 
+	// div[V1]
+	Divergence<<< blocks, tpbLattice >>>(newVel, divVel, dr, frameVel, simWidth);
+
+	// Pressure from Del^2[P] = div[V1]
+	for (int i = 0; i < 50; i++){
+		PressureJacobi<<< blocks, tpbLattice >>> (divVel, pressure, dr, simWidth, simHeight);
+		checkCuda(cudaDeviceSynchronize());
+	}
+
+	// grad[P]
+	Gradient<<< blocks, tpbLattice >>> (pressure, gradPressure, frameVel, dr, simWidth);
+
+	// [V2](final) = [V1] - grad[P]
+	Projection<<< blocks, tpbLattice >>> (newVel, gradPressure, simWidth);
+	Obstruct<<<1, 16>>>(obstructed, newVel);
 
 
-	updateVel<<< blocks, tpbLattice >>>(oldVel, newVel, simWidth);
+	//updateVel<<< blocks, tpbLattice >>>(oldVel, newVel, simWidth);
+	colorVectorField<<< blocks, tpbLattice >>>(devPtr, colorMap, newVel, blocks, simWidth, simHeight);
+	//colorScalarField<<< blocks, tpbLattice >>>(devPtr, colorMap, pressure, blocks, simWidth, simHeight);
 
-	velToColor<<< blocks, tpbLattice >>>(devPtr, colorMap, oldVel, blocks, simWidth, simHeight);
 	checkCuda(cudaDeviceSynchronize());
 
 	checkCuda(cudaGraphicsUnmapResources(1, vboResource, 0));

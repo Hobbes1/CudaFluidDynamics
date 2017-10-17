@@ -17,6 +17,11 @@
 
 #include <cuda_runtime.h>
 #include <cuda_gl_interop.h>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+#include <thrust/fill.h>
+#include <thrust/max_element.h>
+#include <thrust/min_element.h>
 
 #define rowColIdx row*simWidth+col
 #define REFRESH_DELAY 10 
@@ -64,12 +69,13 @@ Obstruct(int *__restrict__ obstructed,
 		 float2 *__restrict__ oldVel);
 
 __global__ void 
-velToColor(float3 *__restrict__ colors, 
-		   float3 *colorMap,
-		   float2 *__restrict__ newVel,
-		   dim3 blocks,
-		   unsigned int simWidth,
-		   unsigned int simHeight);
+colorVectorField(
+	float3 *__restrict__ colors, 
+	float3 *colorMap,
+    float2 *__restrict__ field,
+   	dim3 blocks,
+	unsigned int simWidth,
+    unsigned int simHeight);
 
 void runSim(GLuint c_vbo,
 			int *argc,
@@ -77,16 +83,33 @@ void runSim(GLuint c_vbo,
 			struct cudaGraphicsResource **vboResource, 
 			unsigned int simWidth,
 			unsigned int simHeight);
+__global__ void 
+Advect(float2 *__restrict__ positions,
+	   float2 *__restrict__ oldVel, 
+	   float2 *__restrict__ newVel,
+	   float2 frameVel,
+	   float dt,
+	   float dr,
+	   float4 boundaries,
+	   unsigned int simWidth,
+	   unsigned int simHeight,
+	   unsigned int testX,
+	   unsigned int testY,
+	   bool test);
 
 void runCuda(struct cudaGraphicsResource **vboResource,
-			 int *obstructed,
-			 float3 *colorMap,
-			 float2 *devPositions,
-			 float2 *devVelocities,
-			 float2 *devVelocities2,
+			 int *__restrict__ obstructed,
+			 float3 *__restrict__ colorMap,
+			 float2 *__restrict__ devPositions,
+			 float2 *__restrict__ devVelocities,
+			 float2 *__restrict__ devVelocities2,
+			 float2 *__restrict__ gradPressure,
+ 			 float *__restrict__ devDivVelocity,
+			 float *pressure,
 			 float4 boundaries,
 			 float dt,
 			 float dr,
+			 float2 frameVel,
 			 dim3 tpbColor,
 			 dim3 tpbLattice,
 			 dim3 blocks,
@@ -95,6 +118,25 @@ void runCuda(struct cudaGraphicsResource **vboResource,
 			 unsigned int testX,
 			 unsigned int testY,
 			 bool test);
+
+__global__ void
+Divergence(float2 *__restrict__ newVel, 
+		   float *__restrict__ divVel,
+		   float dr,
+		   float2 frameVel,
+		   unsigned int simWidth);
+
+__global__ void
+Gradient(float *__restrict__ field,
+		 float2 *__restrict__ gradient,
+		 float2 frameVel,
+		 float dr,
+		 unsigned int simWidth);
+
+__global__ void
+Projection(float2 *__restrict__ newVel,
+		   float2 *__restrict__ gradPressure,
+		   unsigned int simWidth);
 
 __global__ void 
 updateVel(float2 *__restrict__ oldVel,
@@ -115,13 +157,39 @@ LinInterp(float2 pos,
 			 float2 RVel, float2 RPos,
 			 float dr);
 
+__global__ void
+PressureJacobi(float* divVel,
+			   float* Pressure,
+			   float dr, 
+			   unsigned int simWidth,
+			   unsigned int simHeight);
+
+__global__ void
+DiffusionJacobi(float2 *__restrict__ positions,
+				float2 *__restrict__ oldVel,
+				float2 *__restrict__ newVel,
+				float dt,
+				float dr,
+				float viscosity,
+				unsigned int simWidth,
+				unsigned int simHeight);
+
+
 __device__ float2
-JacobiInstance(float2 Top, 
-			   float2 Left,
-			   float2 Bot,
-			   float2 Right,
-			   float Alpha,
-			   float2 Val);
+JacobiFieldInstance(float2 Top, 
+				 	float2 Left,
+				    float2 Bot,
+			   	    float2 Right,
+			   	    float Alpha,
+			  	    float2 Val);
+
+__device__ float
+JacobiScalarInstance(float Top,
+					 float Left,
+					 float Bot,
+					 float Right,
+					 float Alpha,
+					 float Val);
 
 
 
